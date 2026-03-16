@@ -1,10 +1,11 @@
-from flask import Flask, render_template, request
+from flask import Flask, request
 
 app = Flask(__name__)
 
-@app.route('/')
+
+@app.route("/")
 def index():
-    return '''
+    return """
         <html>
         <body>
             <form action="/greet" method="POST">
@@ -13,12 +14,14 @@ def index():
             </form>
         </body>
         </html>
-    '''
+    """
 
-@app.route('/greet', methods=['POST'])
+
+@app.route("/greet", methods=["POST"])
 def greet():
-    user_input = request.form['username']
+    user_input = request.form["username"]
     return f"Hello {user_input}, Welcome to this app for Docker demonstration. Please consider like and subscribe to the channel."
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)

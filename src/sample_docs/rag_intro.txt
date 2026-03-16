@@ -1,0 +1,1 @@
+RAG stands for Retrieval Augmented Generation. It retrieves relevant chunks first, then uses them to answer. Embeddings convert text into vectors for semantic search.
