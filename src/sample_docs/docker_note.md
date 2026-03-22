@@ -1,0 +1,1 @@
+Docker packages app code and dependencies into containers. Containers help keep environments consistent across machines.
