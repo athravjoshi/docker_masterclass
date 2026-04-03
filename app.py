@@ -8,13 +8,13 @@ from typing import List, Tuple
 import streamlit as st
 from dotenv import load_dotenv
 
+from chunking import TextChunk, chunk_documents, read_text_files
+from embeding import GeminiClient, InMemoryVectorStore, SearchResult
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
-
-from chunking import TextChunk, chunk_documents, read_text_files
-from embeding import GeminiClient, InMemoryVectorStore, SearchResult
 
 
 def load_environment() -> None:
