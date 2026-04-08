@@ -1,20 +1,25 @@
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 from typing import List, Tuple
 
 import streamlit as st
 from dotenv import load_dotenv
 
-from chunking import TextChunk, chunk_documents, read_text_files
-from embeding import GeminiClient, InMemoryVectorStore, SearchResult
+
+from src.chunking import TextChunk, chunk_documents, read_text_files
+from src.embeding import (
+    Embedder,
+    GeminiClient,
+    GeminiQuotaExceededError,
+    GeminiRateLimitError,
+    InMemoryVectorStore,
+    SearchResult,
+    SentenceTransformerEmbedder,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-SRC_DIR = PROJECT_ROOT / "src"
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
 
 
 def load_environment() -> None:
@@ -45,16 +50,17 @@ def build_prompt(question: str, matches: List[SearchResult]) -> str:
 
 
 def answer_question(
-    client: GeminiClient,
+    generator_client: GeminiClient,
+    embedder: Embedder,
     store: InMemoryVectorStore,
     question: str,
     top_k: int,
 ) -> Tuple[str, List[SearchResult]]:
     """Run retrieval + generation for one question."""
-    query_vector = client.embed_query(question)
+    query_vector = embedder.embed_query(question)
     matches = store.search(query_vector=query_vector, top_k=top_k)
     prompt = build_prompt(question, matches)
-    answer = client.generate_answer(prompt)
+    answer = generator_client.generate_answer(prompt)
     return answer, matches
 
 
@@ -85,6 +91,14 @@ def _init_state() -> None:
         st.session_state.messages = []
     if "client" not in st.session_state:
         st.session_state.client = None
+    if "embedder" not in st.session_state:
+        st.session_state.embedder = None
+
+
+@st.cache_resource(show_spinner=False)
+def _get_embedder(model_name: str) -> SentenceTransformerEmbedder:
+    """Cache the local embedding model across reruns for faster indexing."""
+    return SentenceTransformerEmbedder(model_name=model_name)
 
 
 def main() -> None:
@@ -92,7 +106,7 @@ def main() -> None:
     load_environment()
     _init_state()
 
-    st.title("RAG Chat UI (Streamlit)")
+    st.title("System designed by Master Athrav")
     st.write(
         "Build an index from your documents and ask questions grounded in those docs."
     )
@@ -103,8 +117,8 @@ def main() -> None:
         source_mode = st.radio("Document source", options=["Folder", "Upload files"])
         docs_dir_text = st.text_input("Docs folder", value="src/sample_docs")
         st.file_uploader(
-            "Upload .txt/.md files",
-            type=["txt", "md"],
+            "Upload .txt/.md/.docx files",
+            type=["txt", "md", "docx"],
             accept_multiple_files=True,
             key="uploaded_docs",
             disabled=source_mode != "Upload files",
@@ -127,16 +141,20 @@ def main() -> None:
         st.error("Missing API key. Add GEMINI_API_KEY (or GOOGLE_API_KEY) in .env.")
         st.stop()
 
-    embedding_model = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
     generation_model = os.getenv("GEMINI_GENERATION_MODEL", "gemini-2.5-flash")
+    local_embedding_model = os.getenv("LOCAL_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+    max_retries = int(os.getenv("GEMINI_MAX_RETRIES", "2"))
+    backoff_seconds = float(os.getenv("GEMINI_BACKOFF_SECONDS", "1.5"))
 
     if build_clicked:
         try:
-            client = GeminiClient(
+            generator_client = GeminiClient(
                 api_key=api_key,
-                embedding_model=embedding_model,
                 generation_model=generation_model,
+                max_retries=max_retries,
+                backoff_seconds=backoff_seconds,
             )
+            embedder: Embedder = _get_embedder(local_embedding_model)
 
             if source_mode == "Folder":
                 docs_path = _resolve_docs_path(docs_dir_text)
@@ -159,8 +177,12 @@ def main() -> None:
 
             store = InMemoryVectorStore()
             progress = st.progress(0, text="Embedding chunks...")
-            for idx, chunk in enumerate(chunks, start=1):
-                vector = client.embed_text(chunk.text)
+            vectors = embedder.embed_many([chunk.text for chunk in chunks])
+            if len(vectors) != len(chunks):
+                raise RuntimeError(
+                    "Embedding backend returned mismatched vector count."
+                )
+            for idx, (chunk, vector) in enumerate(zip(chunks, vectors), start=1):
                 store.add(
                     chunk_id=chunk.chunk_id,
                     source=chunk.source,
@@ -172,17 +194,19 @@ def main() -> None:
                 )
             progress.empty()
 
-            st.session_state.client = client
+            st.session_state.client = generator_client
+            st.session_state.embedder = embedder
             st.session_state.store = store
             st.session_state.chunks = chunks
             st.session_state.messages = []
 
             st.success(f"Index ready. Total chunks indexed: {len(chunks)}")
+            st.caption(f"Embedding backend: local model '{local_embedding_model}'")
         except Exception as exc:
             st.error(f"Failed to build index: {exc}")
             st.stop()
 
-    if st.session_state.store is None:
+    if st.session_state.store is None or st.session_state.embedder is None:
         st.info("Build the index from the sidebar, then start chatting.")
         st.stop()
 
@@ -206,7 +230,8 @@ def main() -> None:
             with st.spinner("Thinking..."):
                 try:
                     answer, matches = answer_question(
-                        client=st.session_state.client,
+                        generator_client=st.session_state.client,
+                        embedder=st.session_state.embedder,
                         store=st.session_state.store,
                         question=user_question,
                         top_k=top_k,
@@ -227,6 +252,15 @@ def main() -> None:
                             "sources": source_lines,
                         }
                     )
+                except GeminiQuotaExceededError as exc:
+                    st.error(f"Failed to answer question: {exc}")
+                    st.info(
+                        "The deployed key is out of quota. Update Streamlit secrets "
+                        "with a funded Gemini key or retry after quota reset."
+                    )
+                except GeminiRateLimitError as exc:
+                    st.error(f"Failed to answer question: {exc}")
+                    st.info("Please retry in a few seconds.")
                 except Exception as exc:
                     st.error(f"Failed to answer question: {exc}")
 
