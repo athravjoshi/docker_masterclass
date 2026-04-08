@@ -7,8 +7,24 @@ from typing import List
 
 from dotenv import load_dotenv
 
-from chunking import TextChunk, chunk_documents, read_text_files
-from embeding import GeminiClient, InMemoryVectorStore, SearchResult
+try:
+    from src.chunking import TextChunk, chunk_documents, read_text_files
+    from src.embeding import (
+        Embedder,
+        GeminiClient,
+        InMemoryVectorStore,
+        SearchResult,
+        SentenceTransformerEmbedder,
+    )
+except ModuleNotFoundError:
+    from chunking import TextChunk, chunk_documents, read_text_files
+    from embeding import (
+        Embedder,
+        GeminiClient,
+        InMemoryVectorStore,
+        SearchResult,
+        SentenceTransformerEmbedder,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -101,7 +117,7 @@ def build_prompt(question: str, matches: List[SearchResult]) -> str:
 
 
 def build_index(
-    client: GeminiClient,
+    embedder: Embedder,
     docs_dir: Path,
     chunk_size: int,
     chunk_overlap: int,
@@ -111,12 +127,12 @@ def build_index(
     Flow:
     - Read files from `docs_dir`
     - Chunk documents with overlap
-    - Embed each chunk with Gemini
+    - Embed each chunk with configured embedding backend
     - Store vectors in `InMemoryVectorStore`
 
     Example:
         store, chunks = build_index(
-            client=client,
+            embedder=embedder,
             docs_dir=Path("sample_docs"),
             chunk_size=800,
             chunk_overlap=120,
@@ -138,7 +154,7 @@ def build_index(
 
     store = InMemoryVectorStore()
     for idx, chunk in enumerate(chunks, start=1):
-        vector = client.embed_text(chunk.text)
+        vector = embedder.embed_text(chunk.text)
         store.add(
             chunk_id=chunk.chunk_id,
             source=chunk.source,
@@ -150,7 +166,8 @@ def build_index(
 
 
 def answer_question(
-    client: GeminiClient,
+    generator_client: GeminiClient,
+    embedder: Embedder,
     store: InMemoryVectorStore,
     question: str,
     top_k: int,
@@ -166,10 +183,10 @@ def answer_question(
     Example:
         answer, matches = answer_question(client, store, "Explain RAG", top_k=3)
     """
-    query_vector = client.embed_query(question)
+    query_vector = embedder.embed_query(question)
     matches = store.search(query_vector=query_vector, top_k=top_k)
     prompt = build_prompt(question, matches)
-    answer = client.generate_answer(prompt)
+    answer = generator_client.generate_answer(prompt)
     return answer, matches
 
 
@@ -192,16 +209,17 @@ def main() -> None:
             "Missing API key. Set GEMINI_API_KEY (or GOOGLE_API_KEY) in .env."
         )
 
-    embedding_model = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
     generation_model = os.getenv("GEMINI_GENERATION_MODEL", "gemini-2.5-flash")
+    local_embedding_model = os.getenv("LOCAL_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 
     client = GeminiClient(
         api_key=api_key,
-        embedding_model=embedding_model,
         generation_model=generation_model,
     )
+    embedder: Embedder = SentenceTransformerEmbedder(model_name=local_embedding_model)
+
     store, chunks = build_index(
-        client=client,
+        embedder=embedder,
         docs_dir=args.docs_dir,
         chunk_size=args.chunk_size,
         chunk_overlap=args.chunk_overlap,
@@ -213,7 +231,8 @@ def main() -> None:
 
     if args.query.strip():
         answer, matches = answer_question(
-            client=client,
+            generator_client=client,
+            embedder=embedder,
             store=store,
             question=args.query.strip(),
             top_k=args.top_k,
@@ -235,7 +254,8 @@ def main() -> None:
             break
 
         answer, matches = answer_question(
-            client=client,
+            generator_client=client,
+            embedder=embedder,
             store=store,
             question=question,
             top_k=args.top_k,
