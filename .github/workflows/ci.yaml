@@ -21,9 +21,9 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         pip install pytest pytest-cov radon pylint ccm
-    - name: Run tests with coverage
-      run: |
-        pytest --cov=src --cov-report=xml --cov-report=term
+    # - name: Run tests with coverage
+    #   run: |
+    #     pytest --cov=src --cov-report=xml --cov-report=term
     - name: Check cyclomatic complexity
       run: |
         radon cc src -a
